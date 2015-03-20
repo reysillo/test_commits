@@ -1,0 +1,88 @@
+---
+- hosts: SourceCodeServers
+  vars:
+    project_name: EasysolPortal_DevelopDmsBuild
+    packages_source: "http://192.168.243.140:8121/guestAuth/repository/downloadAll/{{ project_name }}/lastSuccessful/artifacts.zip"
+    # packages_source: "http://192.168.243.163:8080/job/easysol_reports_QA/lastBuild/artifact/*zip*/archive.zip"
+    local_temporal_dir: "/continuous_delivery_files/{{ project_name }}"
+    sources_server_temporal_dir: "/continuous_delivery_files"
+  tasks:
+
+    - name: Instalación de unzip
+      apt: name=unzip state=present
+
+    - name: Instalación de 7zip
+      apt: name=p7zip-full state=present
+
+    - name: Validación del directorio  para almacenamiento de archivos
+      file: path={{ local_temporal_dir }} mode=0777 state=directory recurse=no
+
+    - name: Limpieza de archivos de instalaciones previas
+      shell:  rm -rf {{ local_temporal_dir }}/*.*; rm -rf {{ local_temporal_dir }}/*
+
+    - name: Validación del directorio de paquetes
+      file: path={{ local_temporal_dir }}/packages mode=0777 state=directory recurse=no
+
+    - name: Obteniendo el paquete comprimido de la instalación
+      get_url: url={{ packages_source }} dest={{ local_temporal_dir }}/{{ project_name }}.zip force=yes
+
+    - name: Extrayendo los .war del archivo comprimido descargado
+      command: 7z e -o{{ local_temporal_dir }} {{ local_temporal_dir }}/{{ project_name }}.zip *.war *.zip -r -y
+
+    - name: Extrayendo los archivos de integración continua
+      command: 7z e -o"{{ local_temporal_dir }}/continuous-delivery/" {{ local_temporal_dir }}/{{ project_name }}.zip -r -y "continuous-delivery"
+
+    - name: Descomprimiendo cada uno de los .war extraidos
+      shell:  cd {{ local_temporal_dir }}; ls *.war|awk -F'.war' '{print "unzip -o "$0" -d packages/"$1}'|sh
+
+    - name: Eliminando archivos innecesarios
+      shell:  cd {{ local_temporal_dir }}; rm -rf *.zip *.war
+
+    - name: Valida el directorio local para el almacenamiento de archivos
+      file: path={{ local_temporal_dir }} mode=0777 state=directory recurse=no
+      connection: local
+
+    - name: Sincronizando los archivos de instalación del servidor de sources al servidor local
+      synchronize: src={{ local_temporal_dir }}/ dest={{ sources_server_temporal_dir }}/{{ project_name }}/ delete=yes mode=pull
+
+
+
+- hosts: PortalServers
+  vars:
+    app_port: 8080
+    ssh_port: 2201
+    ports: "{{ app_port }}:8080,{{ ssh_port }}:22"
+    project_name: EasysolPortal_DevelopDmsBuild
+    local_temporal_dir: "/continuous_delivery_files/{{ project_name }}"
+    remote_temporal_dir: "/continuous_delivery_files/{{ project_name }}"
+    continuous_delivery_path: "{{ remote_temporal_dir }}/continuous-delivery/"
+  tasks:
+     - name: Instalando python-pip 
+       apt: name=python-pip state=present
+
+     - name: instalando docker-py
+       pip: name=docker-py
+
+     - name: instalando docker
+       shell: curl -s https://get.docker.io/ubuntu/ | sudo sh
+
+     - name: Validando el directorio remoto almacenamiento de archivos
+       file: path={{ remote_temporal_dir }} mode=0777 state=directory recurse=no
+
+     - name: Sincronizando los archivos de instalación del servidor de local al servidor remoto
+       synchronize: src={{ local_temporal_dir}}/ dest={{ remote_temporal_dir  }}/ delete=yes mode=push
+
+     - name: Test2
+       debug: var={{ continuous_delivery_path }}
+
+     - name: Construyendo una imagen de Docker según el archivo continuous_delivery/Dockerfile con los últimos cambios
+       docker_image: name="{{ project_name }}" path="{{ continuous_delivery_path }}" state=build
+
+     - name: Deteniendo instancias viejas de docker (unsando la shell por medio de uso del puerto)
+       shell: docker stop $(docker ps -a -q||grep {{ project_name }});
+
+     - name: Detiene instancias previas del docker {{ project_name }} (usando nombre de la instancia)
+       docker: image="{{ project_name }}" state=stopped
+
+     - name: Iniciando docker
+       docker: image="{{ project_name }}" ports="{{ ports }}" volumes="{{ remote_temporal_dir }}/packages/webapp-1.0-SNAPSHOT:/opt/tomcat/webapps/ROOT" state=running
